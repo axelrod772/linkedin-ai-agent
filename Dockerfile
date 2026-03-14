@@ -5,10 +5,13 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# System dependencies for PyMuPDF and LinkedIn scraper (Chrome driver is managed by the library)
+# System dependencies for PyMuPDF and LinkedIn scraper
+# Includes Chromium and Chrome driver so scraping works reliably in containers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
+    chromium \
+    chromium-driver \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -22,6 +25,12 @@ RUN pip install --upgrade pip && \
 FROM python:3.11-slim AS runtime
 
 WORKDIR /app
+
+# System dependencies required at runtime for scraping and PDF processing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
+    chromium-driver \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder
 COPY --from=builder /install /usr/local
