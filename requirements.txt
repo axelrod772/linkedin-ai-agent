@@ -1,0 +1,10 @@
+langchain
+langchain-community
+langchain-openai
+linkedin-jobs-scraper
+python-dotenv
+chromadb
+scikit-learn
+pymupdf
+argparse
+streamlit
