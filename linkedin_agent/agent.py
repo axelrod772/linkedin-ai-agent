@@ -1,0 +1,290 @@
+from __future__ import annotations
+
+import os
+from typing import List, Dict, Any
+from langchain_classic.agents import AgentExecutor, create_openai_functions_agent
+from langchain_classic.tools import Tool
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts.chat import ChatPromptTemplate, MessagesPlaceholder
+
+from .config import Settings
+from .memory import JSONMemoryStore
+from .tools import scrape_linkedin_jobs, extract_text_from_pdf, resume_job_desc_match
+
+
+def _build_tools(memory: JSONMemoryStore) -> List[Tool]:
+    """
+    LangChain tools used by the OpenAI Functions agent.
+    """
+
+    def get_profile_history(profile_id: str) -> str:
+        interactions = memory.get_interactions(profile_id)
+        if not interactions:
+            return "No prior interactions for this profile."
+
+        lines = []
+        for idx, inter in enumerate(interactions, start=1):
+            lines.append(
+                f"{idx}. {inter.job_title} at {inter.company} "
+                f"(score={inter.score}) -> {inter.suggestions}"
+            )
+        return "\n".join(lines)
+
+    return [
+        Tool(
+            name="scrape_linkedin_jobs",
+            func=scrape_linkedin_jobs,
+            description=(
+                "Scrape LinkedIn for jobs. "
+                "Inputs: search_term (str), location (str), num_jobs (int)."
+            ),
+        ),
+        Tool(
+            name="get_profile_history",
+            func=get_profile_history,
+            description=(
+                "Retrieve prior suggestions for a given profile_id "
+                "to maintain long-term memory."
+            ),
+        ),
+    ]
+
+
+def _build_agent(settings: Settings, memory: JSONMemoryStore) -> AgentExecutor:
+    """
+    Create an OpenAI Functions agent that can call the registered tools
+    and reason about how to update or query memory.
+    """
+    if not settings.openai_api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. Please configure it in your environment or .env file."
+        )
+
+    llm = ChatOpenAI(
+        model=settings.openai_model_name,
+        temperature=0.2,
+    )
+
+    tools = _build_tools(memory)
+
+    system_prompt = (
+        "You are an AI career coach and LinkedIn job-matching assistant. "
+        "You help AI/ML engineers tailor their resume to specific jobs.\n\n"
+        "You have access to tools that can scrape LinkedIn jobs and that "
+        "let you read/write persistent profile history. Use this memory to "
+        "avoid repeating yourself and to refine suggestions over time. "
+        "You can call a tool to view prior interactions for this profile id.\n\n"
+        "When asked for suggestions, return:\n"
+        "- A short justification (1–2 sentences) of the match quality.\n"
+        "- Bullet points with concrete resume improvements.\n"
+        "- Any missing keywords or skills that should be added."
+    )
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+            # Required by create_openai_functions_agent so it can inject tool call traces.
+            MessagesPlaceholder("agent_scratchpad"),
+        ]
+    )
+
+    agent = create_openai_functions_agent(llm=llm, tools=tools, prompt=prompt)
+    return AgentExecutor(agent=agent, tools=tools, verbose=True)
+
+
+def _sample_jobs(search_term: str, location: str) -> List[Dict[str, Any]]:
+    """
+    Fallback sample jobs used when live scraping fails or returns nothing.
+
+    This keeps the end-to-end workflow demonstrable for portfolios and demos
+    without depending on LinkedIn's front-end structure or anti-bot behavior.
+    The roles are anonymized but modeled after real AI / ML job postings.
+    """
+    return [
+        {
+            "title": f"{search_term} – AI Engineer, Product Experiences",
+            "company": "Northstar Analytics",
+            "location": location,
+            "description": (
+                "Northstar Analytics is hiring an AI Engineer to design and ship LLM-powered product experiences. "
+                "You will work closely with product and backend teams to prototype, evaluate, and deploy features "
+                "such as intelligent assistants, summarization pipelines, and retrieval-augmented experiences.\n\n"
+                "Responsibilities:\n"
+                "- Design and implement LLM workflows using Python and frameworks like LangChain or LangGraph.\n"
+                "- Integrate vector databases for semantic search and personalized recommendations.\n"
+                "- Build evaluation harnesses to measure latency, quality, and safety of prompts and models.\n"
+                "- Collaborate with frontend and platform engineers to integrate APIs into production systems.\n\n"
+                "Requirements:\n"
+                "- Strong Python software engineering background (testing, logging, observability).\n"
+                "- Experience with at least one major cloud provider (AWS / GCP / Azure).\n"
+                "- Hands-on experience with OpenAI or similar LLM APIs.\n"
+                "- Familiarity with Docker and CI/CD workflows."
+            ),
+            "link": "https://jobs.example.com/northstar-analytics/ai-engineer-product-experiences",
+            "date": "Today",
+        },
+        {
+            "title": f"{search_term} – Machine Learning Engineer, Platforms",
+            "company": "Orbital Systems",
+            "location": location,
+            "description": (
+                "Orbital Systems is building a centralized ML platform to support multiple product teams. "
+                "As a Machine Learning Engineer, you will own end-to-end pipelines from data ingestion to "
+                "model serving, with a focus on reliability and reproducibility.\n\n"
+                "Responsibilities:\n"
+                "- Develop and maintain training and inference pipelines for text and tabular models.\n"
+                "- Implement feature stores, experiment tracking, and automated evaluation.\n"
+                "- Optimize inference performance and costs using batching, caching, and quantization.\n"
+                "- Partner with data scientists to productionize research prototypes.\n\n"
+                "Requirements:\n"
+                "- 2+ years of experience building and deploying ML models.\n"
+                "- Proficiency with scikit-learn, PyTorch or TensorFlow.\n"
+                "- Experience with orchestration tools (Airflow, Prefect, or similar).\n"
+                "- Strong SQL skills and familiarity with data warehouses."
+            ),
+            "link": "https://jobs.example.com/orbital-systems/ml-engineer-platforms",
+            "date": "Yesterday",
+        },
+        {
+            "title": f"{search_term} – AI Platform / Agent Engineer",
+            "company": "Vertex Labs",
+            "location": location,
+            "description": (
+                "Vertex Labs is building an internal AI platform that powers agentic workflows across the company. "
+                "In this role you will focus on the infrastructure layer: monitoring, safety, and tooling for LLM "
+                "applications used by hundreds of internal users.\n\n"
+                "Responsibilities:\n"
+                "- Design and implement reusable components for multi-step agents and tools.\n"
+                "- Add guardrails, rate limiting, and observability around LLM calls.\n"
+                "- Work with security to handle secrets, data governance, and PII concerns.\n"
+                "- Build dashboards to monitor quality, cost, and usage across AI features.\n\n"
+                "Requirements:\n"
+                "- Solid backend engineering skills (Python, REST APIs, async IO).\n"
+                "- Experience with tracing / metrics tools (OpenTelemetry, Prometheus, etc.).\n"
+                "- Prior work on LLM agents, tools, or orchestration frameworks.\n"
+                "- Comfortable collaborating with multiple stakeholder teams."
+            ),
+            "link": "https://jobs.example.com/vertex-labs/ai-platform-agent-engineer",
+            "date": "3 days ago",
+        },
+    ]
+
+
+def run_linkedin_agent_workflow(
+    settings: Settings,
+    resume_path: str,
+    job_query: str,
+    location: str | None = None,
+    num_jobs: int | None = None,
+    top_k: int = 5,
+) -> List[Dict[str, Any]]:
+    """
+    High-level orchestration of the LinkedIn agent:
+
+    1. Load resume and compute a stable profile id.
+    2. Scrape LinkedIn jobs.
+    3. Score jobs using a traditional cosine-similarity baseline.
+    4. For the top-k jobs, call the LLM agent to generate targeted
+       improvement suggestions and persist them to JSON memory.
+    """
+    memory = JSONMemoryStore(settings.memory_path)
+    agent = _build_agent(settings, memory)
+
+    resume_text = extract_text_from_pdf(resume_path)
+    profile_id = memory.profile_id_from_resume(resume_text)
+
+    location = location or settings.default_location
+    num_jobs = num_jobs or settings.default_num_jobs
+
+    try:
+        scraped_jobs = scrape_linkedin_jobs(
+            search_term=job_query,
+            location=location,
+            num_jobs=num_jobs,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warning] LinkedIn scrape failed with error: {exc!r}")
+        scraped_jobs = []
+
+    if not scraped_jobs:
+        use_sample = os.getenv("LINKEDIN_USE_SAMPLE_JOBS_IF_EMPTY", "true").lower() == "true"
+        if use_sample:
+            print("[info] No jobs scraped from LinkedIn; falling back to sample jobs.")
+            scraped_jobs = _sample_jobs(job_query, location)
+        else:
+            raise RuntimeError("No jobs scraped from LinkedIn. Try a different query or location.")
+
+    scored_jobs: List[Dict[str, Any]] = []
+    for job in scraped_jobs:
+        score = resume_job_desc_match(resume_text, job["description"])
+        scored_jobs.append(
+            {
+                "title": job["title"],
+                "company": job["company"],
+                "location": job["location"],
+                "description": job["description"],
+                "link": job["link"],
+                "date": job["date"],
+                "score": score,
+            }
+        )
+
+    scored_jobs.sort(key=lambda j: j["score"], reverse=True)
+    top_jobs = scored_jobs[:top_k]
+
+    results: List[Dict[str, Any]] = []
+    for job in top_jobs:
+        # Build a rich natural-language input so the agent can decide
+        # when to consult memory and how to respond.
+        agent_input = (
+            "You are analyzing a candidate's resume against a specific job.\n\n"
+            f"Profile id: {profile_id}\n"
+            f"Job title: {job['title']}\n"
+            f"Company: {job['company']}\n"
+            f"Location: {job['location']}\n"
+            f"Link: {job['link']}\n"
+            f"Relevance score (baseline): {job['score']}%\n\n"
+            "Resume text:\n"
+            f"{resume_text}\n\n"
+            "Job description:\n"
+            f"{job['description']}\n\n"
+            "First, if helpful, call `get_profile_history` to see prior "
+            "interactions for this profile. Then, provide tailored suggestions "
+            "to improve the resume for this job. Your answer should include "
+            "a brief rationale and concrete bullet points."
+        )
+
+        agent_output = agent.invoke(
+            {
+                "input": agent_input,
+                "chat_history": [],
+            }
+        )
+
+        suggestions_text = agent_output.get("output", "")
+
+        memory.add_interaction(
+            profile_id=profile_id,
+            job_link=job["link"],
+            job_title=job["title"],
+            company=job["company"],
+            score=job["score"],
+            suggestions=suggestions_text,
+        )
+
+        results.append(
+            {
+                "title": job["title"],
+                "company": job["company"],
+                "location": job["location"],
+                "link": job["link"],
+                "date": job["date"],
+                "score": job["score"],
+                "suggestions": suggestions_text,
+            }
+        )
+
+    return results
+
