@@ -8,3 +8,5 @@ scikit-learn
 pymupdf
 argparse
 streamlit
+fastapi
+uvicorn
