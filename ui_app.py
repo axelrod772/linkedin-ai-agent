@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 from typing import Optional
 
 import streamlit as st
 
 from linkedin_agent import run_linkedin_agent_workflow
 from linkedin_agent.config import load_settings
+from linkedin_agent.logging_utils import configure_logging
 
 
 def main() -> None:
+    configure_logging()
+    logger = logging.getLogger("linkedin_agent.ui")
+
     st.set_page_config(page_title="LinkedIn AI Agent", layout="wide")
     st.title("LinkedIn AI Agent – Resume & Job Match")
     st.markdown(
@@ -58,6 +63,7 @@ def main() -> None:
                 top_k=top_k,
             )
         except Exception as exc:  # noqa: BLE001
+            logger.exception("Error while running agent from UI")
             st.error(f"Error while running agent: {exc}")
             return
 

@@ -1,15 +1,79 @@
 from __future__ import annotations
 
 import os
+import logging
 from typing import List, Dict, Any
 from langchain_classic.agents import AgentExecutor, create_openai_functions_agent
 from langchain_classic.tools import Tool
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts.chat import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.pydantic_v1 import BaseModel, Field
 
 from .config import Settings
 from .memory import JSONMemoryStore
 from .tools import scrape_linkedin_jobs, extract_text_from_pdf, resume_job_desc_match
+from .vector_memory import get_vector_store, add_profile_document, find_similar_profiles
+
+
+logger = logging.getLogger("linkedin_agent.agent")
+
+
+class OutreachPlan(BaseModel):
+    """
+    Structured plan for a LinkedIn outreach message.
+    """
+
+    subject: str = Field(..., description="Subject line or opening hook for the message.")
+    message: str = Field(..., description="Full LinkedIn message body tailored to the recipient.")
+    strategy: str = Field(..., description="Short explanation of why this approach was chosen.")
+    tone: str = Field(..., description="The dominant tone to use, e.g. 'casual', 'professional', or 'enthusiastic'.")
+    industry: str = Field(..., description="The recipient's primary industry, inferred from their profile.")
+
+
+def plan_outreach(profile_summary: str) -> OutreachPlan:
+    """
+    Core reasoning loop for generating an outreach plan from a profile summary.
+
+    This is used both by the LangChain tool and the FastAPI endpoint.
+    """
+    parser = PydanticOutputParser(pydantic_object=OutreachPlan)
+    format_instructions = parser.get_format_instructions()
+
+    llm = ChatOpenAI(temperature=0.4)
+    prompt = ChatPromptTemplate.from_template(
+        (
+            "You are an AI sales assistant crafting highly personalized LinkedIn messages.\n\n"
+            "First, read the profile summary below and infer the person's primary industry, seniority, "
+            "and likely interests. Then choose the most appropriate tone for the outreach message "
+            "(for example, 'friendly and casual' for startup engineers, or 'concise and formal' for "
+            "enterprise executives).\n\n"
+            "Profile summary:\n"
+            "{profile_summary}\n\n"
+            "Your response must strictly follow this JSON schema:\n"
+            "{format_instructions}\n\n"
+            "- The `subject` should be a short, compelling opening line.\n"
+            "- The `message` should be a complete LinkedIn connection/request message.\n"
+            "- The `strategy` should briefly explain *why* you chose this industry framing and tone.\n"
+            "- The `tone` must be a concrete label such as 'casual', 'professional', or 'enthusiastic'.\n"
+            "- The `industry` should be a single high-level label such as 'SaaS', 'Fintech', or 'Healthcare AI'."
+        )
+    )
+
+    chain = prompt | llm | parser
+    plan: OutreachPlan = chain.invoke({"profile_summary": profile_summary})
+
+    logger.info(
+        "Generated outreach plan",
+        extra={
+            "subject": plan.subject,
+            "tone": plan.tone,
+            "industry": plan.industry,
+            "strategy": plan.strategy,
+        },
+    )
+
+    return plan
 
 
 def _build_tools(memory: JSONMemoryStore) -> List[Tool]:
@@ -30,6 +94,15 @@ def _build_tools(memory: JSONMemoryStore) -> List[Tool]:
             )
         return "\n".join(lines)
 
+    def linkedin_messenger(profile_summary: str) -> str:
+        """
+        Reason about a LinkedIn recipient profile and synthesize
+        an outreach message with explicit subject, message, and strategy.
+        """
+        plan = plan_outreach(profile_summary)
+        # Return as JSON string so the tool output is easy to consume.
+        return plan.json()
+
     return [
         Tool(
             name="scrape_linkedin_jobs",
@@ -45,6 +118,14 @@ def _build_tools(memory: JSONMemoryStore) -> List[Tool]:
             description=(
                 "Retrieve prior suggestions for a given profile_id "
                 "to maintain long-term memory."
+            ),
+        ),
+        Tool(
+            name="linkedin_messenger",
+            func=linkedin_messenger,
+            description=(
+                "Analyze a LinkedIn profile summary and synthesize a JSON object "
+                "with subject, message, tone, industry, and strategy fields for outreach."
             ),
         ),
     ]
@@ -190,6 +271,7 @@ def run_linkedin_agent_workflow(
        improvement suggestions and persist them to JSON memory.
     """
     memory = JSONMemoryStore(settings.memory_path)
+    vector_store = get_vector_store(settings)
     agent = _build_agent(settings, memory)
 
     resume_text = extract_text_from_pdf(resume_path)
@@ -197,6 +279,11 @@ def run_linkedin_agent_workflow(
 
     location = location or settings.default_location
     num_jobs = num_jobs or settings.default_num_jobs
+
+    logger.info(
+        "Scraping LinkedIn jobs",
+        extra={"job_query": job_query, "location": location, "num_jobs": num_jobs},
+    )
 
     try:
         scraped_jobs = scrape_linkedin_jobs(
@@ -238,6 +325,44 @@ def run_linkedin_agent_workflow(
     for job in top_jobs:
         # Build a rich natural-language input so the agent can decide
         # when to consult memory and how to respond.
+        # Store this interaction as a semantic document in Chroma so
+        # future runs can recall similar profiles / roles.
+        profile_doc_text = (
+            f"Job: {job['title']} at {job['company']} (Location: {job['location']})\n"
+            f"Description:\n{job['description']}\n"
+        )
+        profile_metadata = {
+            "profile_id": profile_id,
+            "job_link": job["link"],
+            "job_title": job["title"],
+            "company": job["company"],
+            "type": "job_profile",
+        }
+        add_profile_document(
+            vector_store=vector_store,
+            text=profile_doc_text,
+            metadata=profile_metadata,
+            doc_id=f"{profile_id}:{job['link']}",
+        )
+
+        similar_profiles = find_similar_profiles(
+            vector_store=vector_store,
+            query_text=job["description"],
+            k=3,
+        )
+        similar_snippets = []
+        for idx, (text, meta) in enumerate(similar_profiles, start=1):
+            ref_company = meta.get("company", "Unknown Company")
+            ref_title = meta.get("job_title", "Unknown Title")
+            similar_snippets.append(f"{idx}. {ref_title} at {ref_company}")
+
+        similar_text_block = (
+            "I see this job is similar to previous leads:\n"
+            + "\n".join(similar_snippets)
+            if similar_snippets
+            else "No closely similar prior leads were found in memory."
+        )
+
         agent_input = (
             "You are analyzing a candidate's resume against a specific job.\n\n"
             f"Profile id: {profile_id}\n"
@@ -246,6 +371,7 @@ def run_linkedin_agent_workflow(
             f"Location: {job['location']}\n"
             f"Link: {job['link']}\n"
             f"Relevance score (baseline): {job['score']}%\n\n"
+            f"{similar_text_block}\n\n"
             "Resume text:\n"
             f"{resume_text}\n\n"
             "Job description:\n"
@@ -256,6 +382,16 @@ def run_linkedin_agent_workflow(
             "a brief rationale and concrete bullet points."
         )
 
+        logger.info(
+            "Invoking agent for job",
+            extra={
+                "profile_id": profile_id,
+                "job_title": job["title"],
+                "company": job["company"],
+                "baseline_score": job["score"],
+            },
+        )
+
         agent_output = agent.invoke(
             {
                 "input": agent_input,
@@ -264,6 +400,15 @@ def run_linkedin_agent_workflow(
         )
 
         suggestions_text = agent_output.get("output", "")
+
+        logger.info(
+            "Agent completed for job",
+            extra={
+                "profile_id": profile_id,
+                "job_title": job["title"],
+                "company": job["company"],
+            },
+        )
 
         memory.add_interaction(
             profile_id=profile_id,

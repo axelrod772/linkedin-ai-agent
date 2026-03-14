@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 from linkedin_agent.config import load_settings
 from linkedin_agent import run_linkedin_agent_workflow
+from linkedin_agent.logging_utils import configure_logging
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,8 +51,22 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    configure_logging()
+
     args = parse_args()
     settings = load_settings()
+
+    logger = logging.getLogger("linkedin_agent")
+    logger.info(
+        "Starting LinkedIn agent workflow",
+        extra={
+            "resume_path": str(args.resume),
+            "job_query": args.query,
+            "location": args.location,
+            "num_jobs": args.num_jobs,
+            "top_k": args.top_k,
+        },
+    )
 
     results = run_linkedin_agent_workflow(
         settings=settings,

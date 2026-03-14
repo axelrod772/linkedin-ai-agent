@@ -24,6 +24,7 @@ class Settings:
     default_location: str
     default_num_jobs: int
     memory_path: str
+    chroma_dir: str
 
 
 def load_settings() -> Settings:
@@ -40,5 +41,6 @@ def load_settings() -> Settings:
         default_location=os.getenv("LINKEDIN_DEFAULT_LOCATION", "Remote"),
         default_num_jobs=int(os.getenv("LINKEDIN_DEFAULT_NUM_JOBS", "20")),
         memory_path=os.getenv("LINKEDIN_MEMORY_PATH", "linkedin_memory.json"),
+        chroma_dir=os.getenv("LINKEDIN_CHROMA_DIR", "chroma_db"),
     )
 
