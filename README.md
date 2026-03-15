@@ -1,6 +1,6 @@
 ## LinkedIn AI Agent – Resume & Job Match
 
-This project is a production-oriented LinkedIn job scraping and resume-matching agent built for an **AI Engineer** portfolio. It turns a traditional notebook-style prototype into a modular LLM-powered agent with a CLI, a Streamlit UI, persistent memory, and Docker packaging.
+This project is a production-oriented LinkedIn job scraping and resume-matching agent built for an **AI Engineer** portfolio. It turns a traditional notebook-style prototype into a modular LLM-powered agent with a CLI, a Streamlit UI, a FastAPI service, persistent memory (JSON + ChromaDB), and Docker packaging.
 
 The agent:
 
@@ -8,17 +8,21 @@ The agent:
 - **Matches jobs against your resume** using a cosine-similarity baseline.
 - **Generates targeted, LLM-powered suggestions** to improve your resume for the top matching jobs.
 - **Persists memory** of previous profile–job interactions so future runs can reuse context.
-- **Exposes both a CLI and Streamlit UI** so the same agent workflow can be driven from the terminal or a browser.
+- **Stores semantic job/profile embeddings** in a local **ChromaDB** vector store for similarity-based recall.
+- **Exposes both a CLI, a Streamlit UI, and a FastAPI API** so the same agent workflow can be driven from the terminal, a browser, or HTTP.
 
 ### Architecture Overview
 
-The codebase is organized into a small Python package plus a CLI entrypoint:
+The codebase is organized into a small Python package plus multiple entrypoints:
 
 - **`linkedin_agent/config.py`**: Loads configuration and secrets from environment / `.env`.
 - **`linkedin_agent/tools.py`**: Scraping utilities, PDF parsing, and similarity scoring.
 - **`linkedin_agent/memory.py`**: JSON-based persistent memory of profile–job interactions.
-- **`linkedin_agent/agent.py`**: LangChain agent built with `create_openai_functions_agent`.
+- **`linkedin_agent/vector_memory.py`**: ChromaDB-based semantic memory for profiles and jobs.
+- **`linkedin_agent/agent.py`**: LangChain agent built with `create_openai_functions_agent` plus a structured outreach planner.
 - **`main.py`**: Command-line entrypoint that wires everything together.
+- **`ui_app.py`**: Streamlit UI for running the workflow in a browser.
+- **`api.py`**: FastAPI app exposing the outreach planner as an HTTP API.
 
 #### Text-Based Architecture Diagram
 
@@ -44,28 +48,54 @@ The codebase is organized into a small Python package plus a CLI entrypoint:
      | - scrape_linkedin_jobs()  |  | - JSONMemoryStore  |
      | - extract_text_from_pdf() |  | - InteractionRecord|
      | - resume_job_desc_match() |  +-----------+--------+
-     +-----------------------+               |
+     +-----------+-----------+               |
+                 |                           v
+                 v               +-----------+-----------+
+     +-----------+-----------+   |  vector_memory.py     |
+     |   api.py / ui_app.py  |   | - ChromaDB store      |
+     | - FastAPI / Streamlit |   | - profile similarity  |
+     +-----------------------+   +-----------+-----------+
+                                             |
                                              v
                                  +-----------+-----------+
                                  |  linkedin_memory.json |
+                                 |  chroma_db/           |
                                  | (persistent memory)   |
                                  +-----------------------+
 ```
 
 ### Key Features
 
-- **Modular architecture**: Clean separation of configuration, tools, memory, and agent orchestration.
+- **Modular architecture**: Clean separation of configuration, tools, memory, agent orchestration, and API layer.
 - **LangChain-powered agent**: Uses `create_openai_functions_agent` with OpenAI models for tool-calling and stateful reasoning.
+- **Structured outreach planning**: A Pydantic `OutreachPlan` model and output parser ensure every outreach message includes `subject`, `message`, `strategy`, `tone`, and `industry`.
 - **Context-aware messaging**: The agent reads prior suggestions for a profile and refines future guidance instead of starting from scratch.
-- **Persistent JSON memory**: `linkedin_memory.json` stores historical profile–job interactions (title, company, score, suggestions).
+- **Persistent JSON + vector memory**: `linkedin_memory.json` stores historical profile–job interactions while `chroma_db/` stores semantic embeddings for similarity search.
+- **Centralized logging**: All agent “thoughts” and “actions” are logged to `logs/agent.log` via a rotating file handler.
 - **Rate limiting protection**: LinkedIn scraping is executed with conservative settings and a small delay to avoid hammering the site; the number of analyzed jobs is configurable.
-- **Containerized deployment**: Multi-stage `Dockerfile` produces a small runtime image for local or cloud deployment.
+- **Containerized deployment**: Multi-stage `Dockerfile` produces a small runtime image for local or cloud deployment, including Chromium and the Chrome driver for scraping.
 
 > **Note**: This project is intended for educational and personal portfolio use. When scraping LinkedIn or any other site, ensure that you comply with their terms of service.
 
 > **Scraping vs. Sample Jobs**: In environments where LinkedIn changes its DOM or blocks automated access, the live scraper may return no results. When that happens, the agent automatically falls back to a small set of **curated, anonymized AI/ML job descriptions** modeled after real postings. This keeps the end‑to‑end scoring + LLM + memory pipeline demonstrable while being transparent that not all runs use live LinkedIn data.
 >
 > You can control this behavior with **`LINKEDIN_USE_SAMPLE_JOBS_IF_EMPTY`** (default: `true`) in your `.env`.
+
+#### Authenticated scraping (recommended)
+
+The scraper library supports an **authenticated session** so LinkedIn treats the run as a logged-in user. That usually returns more jobs and fewer timeouts than anonymous mode.
+
+1. **Get your `li_at` cookie**
+   - Log in to [linkedin.com](https://www.linkedin.com) in Chrome (or Edge).
+   - Open DevTools (F12) → **Application** (or **Storage**) → **Cookies** → `https://www.linkedin.com`.
+   - Find the cookie named **`li_at`** and copy its **Value** (long string).
+2. **Put it in `.env`**
+   - Add a line: `LI_AT_COOKIE=paste_the_value_here` (no quotes).
+   - Do not commit `.env` or share this value; it is a session secret.
+3. **Run the app**
+   - The scraper reads `LI_AT_COOKIE` from the environment. If it is set, it uses the authenticated strategy instead of the deprecated anonymous one.
+
+The `li_at` cookie can expire (often after a short time or when you log out). If scraping starts failing again, refresh the cookie from the browser and update `.env`.
 
 ### Setup Instructions
 
@@ -93,6 +123,7 @@ Optional:
 
 - **`NVIDIA_API_KEY`**, **`NVIDIA_MODEL_NAME`** if you want to experiment with NVIDIA endpoints separately.
 - **`LINKEDIN_DEFAULT_LOCATION`**, **`LINKEDIN_DEFAULT_NUM_JOBS`**, **`LINKEDIN_MEMORY_PATH`** to tune defaults.
+- **`LINKEDIN_CHROMA_DIR`**: Directory where the ChromaDB vector store will persist (default: `chroma_db`).
 
 #### 3. Install Dependencies (Local Dev)
 
@@ -143,6 +174,36 @@ streamlit run ui_app.py
 ```
 
 The UI lets you upload a resume PDF, choose a target role and location, and browse the top-matching jobs and suggestions in expandable panels.
+
+#### 6. Run the FastAPI Outreach API
+
+To demonstrate the outreach planner as a service, run the FastAPI app with Uvicorn:
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+Then send a LinkedIn-style profile summary via `POST`:
+
+```bash
+curl -X POST http://localhost:8000/api/linkedin-messenger \
+  -H "Content-Type: application/json" \
+  -d '{
+    "profile_summary": "Senior ML engineer at a fintech startup working on fraud detection and credit risk models..."
+  }'
+```
+
+The API responds with a structured JSON outreach plan:
+
+```json
+{
+  "subject": "...",
+  "message": "...",
+  "strategy": "...",
+  "tone": "professional",
+  "industry": "Fintech"
+}
+```
 
 ### Docker Usage
 
