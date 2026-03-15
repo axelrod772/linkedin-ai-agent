@@ -8,10 +8,11 @@ from langchain_classic.tools import Tool
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts.chat import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import PydanticOutputParser
-from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
 
 from .config import Settings
 from .memory import JSONMemoryStore
+from .sample_jobs_data import get_sample_jobs
 from .tools import scrape_linkedin_jobs, extract_text_from_pdf, resume_job_desc_match
 from .vector_memory import get_vector_store, add_profile_document, find_similar_profiles
 
@@ -178,79 +179,32 @@ def _build_agent(settings: Settings, memory: JSONMemoryStore) -> AgentExecutor:
 def _sample_jobs(search_term: str, location: str) -> List[Dict[str, Any]]:
     """
     Fallback sample jobs used when live scraping fails or returns nothing.
-
-    This keeps the end-to-end workflow demonstrable for portfolios and demos
-    without depending on LinkedIn's front-end structure or anti-bot behavior.
-    The roles are anonymized but modeled after real AI / ML job postings.
+    Returns 100+ India-based roles (companies and locations) so any resume gets a match.
     """
-    return [
-        {
-            "title": f"{search_term} – AI Engineer, Product Experiences",
-            "company": "Northstar Analytics",
-            "location": location,
-            "description": (
-                "Northstar Analytics is hiring an AI Engineer to design and ship LLM-powered product experiences. "
-                "You will work closely with product and backend teams to prototype, evaluate, and deploy features "
-                "such as intelligent assistants, summarization pipelines, and retrieval-augmented experiences.\n\n"
-                "Responsibilities:\n"
-                "- Design and implement LLM workflows using Python and frameworks like LangChain or LangGraph.\n"
-                "- Integrate vector databases for semantic search and personalized recommendations.\n"
-                "- Build evaluation harnesses to measure latency, quality, and safety of prompts and models.\n"
-                "- Collaborate with frontend and platform engineers to integrate APIs into production systems.\n\n"
-                "Requirements:\n"
-                "- Strong Python software engineering background (testing, logging, observability).\n"
-                "- Experience with at least one major cloud provider (AWS / GCP / Azure).\n"
-                "- Hands-on experience with OpenAI or similar LLM APIs.\n"
-                "- Familiarity with Docker and CI/CD workflows."
-            ),
-            "link": "https://jobs.example.com/northstar-analytics/ai-engineer-product-experiences",
-            "date": "Today",
-        },
-        {
-            "title": f"{search_term} – Machine Learning Engineer, Platforms",
-            "company": "Orbital Systems",
-            "location": location,
-            "description": (
-                "Orbital Systems is building a centralized ML platform to support multiple product teams. "
-                "As a Machine Learning Engineer, you will own end-to-end pipelines from data ingestion to "
-                "model serving, with a focus on reliability and reproducibility.\n\n"
-                "Responsibilities:\n"
-                "- Develop and maintain training and inference pipelines for text and tabular models.\n"
-                "- Implement feature stores, experiment tracking, and automated evaluation.\n"
-                "- Optimize inference performance and costs using batching, caching, and quantization.\n"
-                "- Partner with data scientists to productionize research prototypes.\n\n"
-                "Requirements:\n"
-                "- 2+ years of experience building and deploying ML models.\n"
-                "- Proficiency with scikit-learn, PyTorch or TensorFlow.\n"
-                "- Experience with orchestration tools (Airflow, Prefect, or similar).\n"
-                "- Strong SQL skills and familiarity with data warehouses."
-            ),
-            "link": "https://jobs.example.com/orbital-systems/ml-engineer-platforms",
-            "date": "Yesterday",
-        },
-        {
-            "title": f"{search_term} – AI Platform / Agent Engineer",
-            "company": "Vertex Labs",
-            "location": location,
-            "description": (
-                "Vertex Labs is building an internal AI platform that powers agentic workflows across the company. "
-                "In this role you will focus on the infrastructure layer: monitoring, safety, and tooling for LLM "
-                "applications used by hundreds of internal users.\n\n"
-                "Responsibilities:\n"
-                "- Design and implement reusable components for multi-step agents and tools.\n"
-                "- Add guardrails, rate limiting, and observability around LLM calls.\n"
-                "- Work with security to handle secrets, data governance, and PII concerns.\n"
-                "- Build dashboards to monitor quality, cost, and usage across AI features.\n\n"
-                "Requirements:\n"
-                "- Solid backend engineering skills (Python, REST APIs, async IO).\n"
-                "- Experience with tracing / metrics tools (OpenTelemetry, Prometheus, etc.).\n"
-                "- Prior work on LLM agents, tools, or orchestration frameworks.\n"
-                "- Comfortable collaborating with multiple stakeholder teams."
-            ),
-            "link": "https://jobs.example.com/vertex-labs/ai-platform-agent-engineer",
-            "date": "3 days ago",
-        },
-    ]
+    return get_sample_jobs(search_term, location)
+
+
+def _job_age_in_days(date_str: str) -> int | None:
+    """
+    Best-effort conversion of LinkedIn job 'date' strings into an age in days.
+
+    Handles values like 'Today', 'Yesterday', '3 days ago', or returns None
+    if the format is unrecognized.
+    """
+    text = str(date_str).strip().lower()
+    if not text:
+        return None
+    if "today" in text or "just now" in text:
+        return 0
+    if "yesterday" in text:
+        return 1
+    for token in text.split():
+        if token.isdigit():
+            try:
+                return int(token)
+            except ValueError:
+                return None
+    return None
 
 
 def run_linkedin_agent_workflow(
@@ -259,7 +213,8 @@ def run_linkedin_agent_workflow(
     job_query: str,
     location: str | None = None,
     num_jobs: int | None = None,
-    top_k: int = 5,
+    top_k: int | None = None,
+    max_job_age_days: int | None = None,
 ) -> List[Dict[str, Any]]:
     """
     High-level orchestration of the LinkedIn agent:
@@ -279,6 +234,8 @@ def run_linkedin_agent_workflow(
 
     location = location or settings.default_location
     num_jobs = num_jobs or settings.default_num_jobs
+    top_k = top_k or settings.agent_default_top_k
+    max_job_age_days = max_job_age_days or settings.max_job_age_days
 
     logger.info(
         "Scraping LinkedIn jobs",
@@ -302,6 +259,16 @@ def run_linkedin_agent_workflow(
             scraped_jobs = _sample_jobs(job_query, location)
         else:
             raise RuntimeError("No jobs scraped from LinkedIn. Try a different query or location.")
+
+    # Optionally filter jobs by recency if we can interpret the 'date' field.
+    if max_job_age_days is not None:
+        filtered: List[Dict[str, Any]] = []
+        for job in scraped_jobs:
+            age = _job_age_in_days(job.get("date", ""))
+            if age is None or age <= max_job_age_days:
+                filtered.append(job)
+        if filtered:
+            scraped_jobs = filtered
 
     scored_jobs: List[Dict[str, Any]] = []
     for job in scraped_jobs:

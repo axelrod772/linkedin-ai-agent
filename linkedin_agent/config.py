@@ -25,6 +25,10 @@ class Settings:
     default_num_jobs: int
     memory_path: str
     chroma_dir: str
+    max_job_age_days: int
+    default_experience_level: str
+    page_timeout_seconds: int
+    agent_default_top_k: int
 
 
 def load_settings() -> Settings:
@@ -42,5 +46,9 @@ def load_settings() -> Settings:
         default_num_jobs=int(os.getenv("LINKEDIN_DEFAULT_NUM_JOBS", "20")),
         memory_path=os.getenv("LINKEDIN_MEMORY_PATH", "linkedin_memory.json"),
         chroma_dir=os.getenv("LINKEDIN_CHROMA_DIR", "chroma_db"),
+        max_job_age_days=int(os.getenv("LINKEDIN_MAX_JOB_AGE_DAYS", "3")),
+        default_experience_level=os.getenv("LINKEDIN_DEFAULT_EXPERIENCE_LEVEL", "any"),
+        page_timeout_seconds=int(os.getenv("LINKEDIN_PAGE_TIMEOUT_SECONDS", "60")),
+        agent_default_top_k=int(os.getenv("AGENT_DEFAULT_TOP_K", "5")),
     )
 
