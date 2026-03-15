@@ -19,7 +19,9 @@ The codebase is organized into a small Python package plus multiple entrypoints:
 - **`linkedin_agent/tools.py`**: Scraping utilities, PDF parsing, and similarity scoring.
 - **`linkedin_agent/memory.py`**: JSON-based persistent memory of profile–job interactions.
 - **`linkedin_agent/vector_memory.py`**: ChromaDB-based semantic memory for profiles and jobs.
+- **`linkedin_agent/query_intent.py`**: Natural-language search intent parser (`SearchIntent`, `parse_search_intent`).
 - **`linkedin_agent/agent.py`**: LangChain agent built with `create_openai_functions_agent` plus a structured outreach planner.
+- **`linkedin_agent/sample_jobs_data.py`**: Curated sample job postings used when live scraping returns no results.
 - **`main.py`**: Command-line entrypoint that wires everything together.
 - **`ui_app.py`**: Streamlit UI for running the workflow in a browser.
 - **`api.py`**: FastAPI app exposing the outreach planner as an HTTP API.
@@ -77,7 +79,7 @@ The codebase is organized into a small Python package plus multiple entrypoints:
 
 > **Note**: This project is intended for educational and personal portfolio use. When scraping LinkedIn or any other site, ensure that you comply with their terms of service.
 
-> **Scraping vs. Sample Jobs**: In environments where LinkedIn changes its DOM or blocks automated access, the live scraper may return no results. When that happens, the agent automatically falls back to a small set of **curated, anonymized AI/ML job descriptions** modeled after real postings. This keeps the end‑to‑end scoring + LLM + memory pipeline demonstrable while being transparent that not all runs use live LinkedIn data.
+> **Scraping vs. Sample Jobs**: In environments where LinkedIn changes its DOM or blocks automated access, the live scraper may return no results. When that happens, the agent automatically falls back to **curated sample jobs** from `linkedin_agent/sample_jobs_data.py` (diverse roles and locations so any resume can get a match). This keeps the end‑to‑end scoring + LLM + memory pipeline demonstrable while being transparent that not all runs use live LinkedIn data.
 >
 > You can control this behavior with **`LINKEDIN_USE_SAMPLE_JOBS_IF_EMPTY`** (default: `true`) in your `.env`.
 
@@ -124,6 +126,8 @@ Optional:
 - **`NVIDIA_API_KEY`**, **`NVIDIA_MODEL_NAME`** if you want to experiment with NVIDIA endpoints separately.
 - **`LINKEDIN_DEFAULT_LOCATION`**, **`LINKEDIN_DEFAULT_NUM_JOBS`**, **`LINKEDIN_MEMORY_PATH`** to tune defaults.
 - **`LINKEDIN_CHROMA_DIR`**: Directory where the ChromaDB vector store will persist (default: `chroma_db`).
+- **`LINKEDIN_MAX_JOB_AGE_DAYS`**, **`LINKEDIN_DEFAULT_EXPERIENCE_LEVEL`**, **`LINKEDIN_PAGE_TIMEOUT_SECONDS`**, **`AGENT_DEFAULT_TOP_K`**: Scraper and agent defaults (see `.env.example`).
+- **`LI_AT_COOKIE`**: For authenticated LinkedIn scraping (see “Authenticated scraping” above).
 
 #### 3. Install Dependencies (Local Dev)
 
@@ -140,7 +144,9 @@ pip install -r requirements.txt
 
 #### 4. Run the Agent Locally (CLI)
 
-Make sure you have a resume in PDF format on disk, then run:
+Make sure you have a resume in PDF format on disk. You can use either a structured query or a **natural-language** description:
+
+**Structured query:**
 
 ```bash
 python main.py \
@@ -148,6 +154,14 @@ python main.py \
   --query "AI Engineer" \
   --location "Remote" \
   --top-k 5
+```
+
+**Natural-language query** (the agent parses role, location, experience, and time window):
+
+```bash
+python main.py \
+  --resume path/to/your_resume.pdf \
+  --natural-query "look for AI engineer roles with no experience in Hyderabad posted in the last 24 hours"
 ```
 
 You should see output similar to:
@@ -173,7 +187,7 @@ If you prefer a browser-based workflow, you can use the Streamlit app defined in
 streamlit run ui_app.py
 ```
 
-The UI lets you upload a resume PDF, choose a target role and location, and browse the top-matching jobs and suggestions in expandable panels.
+The UI lets you upload a resume PDF, then either enter a **target role and location** or describe your search in **plain language** (e.g. “Look for AI engineer roles with no experience in Hyderabad posted in the last 24 hours”). You can also set “Only include jobs from last N days” and use the **Outreach planner demo** (paste a LinkedIn profile summary and get a structured outreach plan). Results appear as expandable panels with job links and improvement suggestions.
 
 #### 6. Run the FastAPI Outreach API
 
@@ -236,6 +250,16 @@ docker run --rm `
 ```
 
 You can also rely on the `CMD` defined in the `Dockerfile` and only override the resume path with environment variables or a different command as needed.
+
+### Tests
+
+From the project root:
+
+```bash
+pytest
+```
+
+Runs unit tests for job-age parsing and the JSON memory store (see `tests/test_utils.py`).
 
 ### How This Helps Your AI Engineer Resume
 
