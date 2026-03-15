@@ -18,6 +18,10 @@ env/
 chroma_db/
 logs/
 
+# Test and temp
+.pytest_cache/
+tmp_uploads/
+
 # Notebooks and outputs
 *.ipynb
 
